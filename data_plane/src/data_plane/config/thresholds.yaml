@@ -1,0 +1,118 @@
+# Watcher threshold table — design §7.3 (base) and §7.4 (composites).
+# Config, not code: tune here without a redeploy. Two tiers per series:
+#   notable     -> quiet dashboard annotation
+#   significant -> push/alert (explainer writes more)
+#
+# Units: z = |z-score|, pct = |return| %, bp = basis points, level_* = absolute,
+#        jump_pct = 1-day % jump, volume_mult = x average, tone_z = tone z-score.
+
+indicators:
+  # --- Release-based: surprise watcher (z vs trailing prints) ---------------
+  DFF:
+    watcher: delta          # Fed funds: level change at FOMC
+    window: 1
+    warmup: 1
+    cooldown: 0
+    notable:      { bp: 0.01 }     # any target-range change
+    significant:  { bp: 25 }       # >= 25 bp (or move when none expected — see context)
+
+  CPIAUCSL:
+    watcher: surprise       # z of MoM %
+    window: 12
+    warmup: 12
+    cooldown: 1
+    notable:      { z: 2 }
+    significant:  { z: 3 }
+
+  PAYEMS:
+    watcher: surprise       # z of monthly delta
+    window: 12
+    warmup: 12
+    cooldown: 1
+    notable:      { z: 2 }
+    significant:  { z: 3 }
+
+  UNRATE:
+    watcher: surprise       # surprise + level; Sahm handled as composite
+    window: 12
+    warmup: 12
+    cooldown: 1
+    notable:      { z: 2, extra: { mom_pp: 0.2 } }
+    significant:  { z: 3 }
+
+  GDPC1:
+    watcher: surprise       # surprise + level (negative print = contraction)
+    window: 4
+    warmup: 4
+    cooldown: 1
+    notable:      { extra: { qoq_pp: 1.0 } }
+    significant:  { level_lt: 0 }
+
+  UMCSENT:
+    watcher: surprise       # z of MoM delta
+    window: 12
+    warmup: 12
+    cooldown: 1
+    notable:      { z: 2, extra: { mom_pts: 5 } }
+    significant:  { extra: { mom_pts: 10 } }
+
+  # --- Continuous/daily: delta + absolute level crossings ------------------
+  DGS10:
+    watcher: delta
+    window: 60
+    warmup: 20
+    cooldown: 1
+    hysteresis: 0.05        # re-arm margin on 4 / 4.5 / 5% crossings
+    notable:      { bp: 10 }
+    significant:  { bp: 18, extra: { levels: [4.0, 4.5, 5.0] } }
+
+  SP500:
+    watcher: delta          # delta + drawdown
+    window: 60
+    warmup: 20
+    cooldown: 1
+    notable:      { pct: 2.0 }
+    significant:  { pct: 3.0, extra: { drawdown_pct: 10 } }   # -10% from recent high
+
+  VIXCLS:
+    watcher: delta          # level + spike
+    window: 20
+    warmup: 20
+    cooldown: 1
+    hysteresis: 2.0         # must drop below 28 before ">30" re-fires
+    notable:      { level_gt: 20, jump_pct: 15 }
+    significant:  { level_gt: 30, jump_pct: 25 }
+
+  # --- News: tone/volume watcher (per theme) -------------------------------
+  tone.fed:        &tone { watcher: tone, window: 14, warmup: 7, cooldown: 1,
+                           notable: { volume_mult: 2, tone_z: -2 },
+                           significant: { volume_mult: 3, tone_z: -2 } }
+  tone.inflation:  *tone
+  tone.jobs:       *tone
+  tone.trade:      *tone
+
+# --- Composite watchers (§7.4): pure arithmetic over series above ----------
+composites:
+  yield_curve:
+    rule: yield_curve
+    inputs: [DGS10, DFF]
+    cooldown: 5
+    params: { trigger_lt: 0.0 }            # 10Y - FedFunds goes negative
+
+  sahm:
+    rule: sahm
+    inputs: [UNRATE]
+    cooldown: 1
+    params: { rise_pp: 0.5, avg_months: 3, low_window_months: 12 }
+
+  risk_off:
+    rule: risk_off
+    inputs: [SP500, VIXCLS]
+    cooldown: 1
+    params: { sp_down_pct: 2.0, vix_up_pct: 15.0 }   # same day
+
+  stagflation:
+    rule: stagflation
+    inputs: [CPIAUCSL, UMCSENT]
+    cooldown: 1
+    params: { cpi_surprise_up: true, sentiment_down: true }
